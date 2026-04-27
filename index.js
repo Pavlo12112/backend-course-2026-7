@@ -1,19 +1,23 @@
-const express = require('express');
-const { program } = require('commander');
-const fs = require('fs');
-const path = require('path');
-const multer = require('multer');
+require("dotenv").config();
+
+const express = require("express");
+const { program } = require("commander");
+const fs = require("fs");
+const path = require("path");
+const multer = require("multer");
 
 const swaggerUi = require("swagger-ui-express");
 const swaggerJsdoc = require("swagger-jsdoc");
+
+const pool = require("./src/db");
 
 /* =======================
    CLI
 ======================= */
 program
-  .requiredOption('-H, --host <host>')
-  .requiredOption('-p, --port <port>')
-  .requiredOption('-c, --cache <cache>');
+  .option("-H, --host <host>", "host", process.env.HOST || "0.0.0.0")
+  .option("-p, --port <port>", "port", process.env.PORT || 3000)
+  .option("-c, --cache <cache>", "cache", "cache");
 
 program.parse();
 
@@ -23,7 +27,8 @@ const options = program.opts();
    Folders
 ======================= */
 if (!fs.existsSync(options.cache)) fs.mkdirSync(options.cache);
-if (!fs.existsSync('photos')) fs.mkdirSync('photos');
+
+if (!fs.existsSync("photos")) fs.mkdirSync("photos");
 
 /* =======================
    App
@@ -33,23 +38,17 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const upload = multer({ dest: 'photos/' });
+const upload = multer({ dest: "photos/" });
 
 /* =======================
-   DB
-======================= */
-let inventory = [];
-let nextId = 1;
-
-/* =======================
-   Swagger (FIXED)
+   Swagger
 ======================= */
 const swaggerOptions = {
   definition: {
     openapi: "3.0.0",
     info: {
       title: "Inventory API",
-      version: "1.0.0"
+      version: "2.0.0"
     }
   },
   apis: ["./index.js"]
@@ -60,239 +59,195 @@ const swaggerSpec = swaggerJsdoc(swaggerOptions);
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 /* =======================
-   HTML
+   HTML Forms
 ======================= */
-app.get('/RegisterForm.html', (req, res) => {
-  res.sendFile(path.join(__dirname, 'RegisterForm.html'));
+app.get("/RegisterForm.html", (req, res) => {
+  res.sendFile(path.join(__dirname, "RegisterForm.html"));
 });
 
-app.get('/SearchForm.html', (req, res) => {
-  res.sendFile(path.join(__dirname, 'SearchForm.html'));
+app.get("/SearchForm.html", (req, res) => {
+  res.sendFile(path.join(__dirname, "SearchForm.html"));
 });
 
 /* =======================
    REGISTER
 ======================= */
-/**
- * @openapi
- * /register:
- *   post:
- *     summary: Register item
- *     requestBody:
- *       required: true
- *       content:
- *         multipart/form-data:
- *           schema:
- *             type: object
- *             required:
- *               - inventory_name
- *             properties:
- *               inventory_name:
- *                 type: string
- *               description:
- *                 type: string
- *               photo:
- *                 type: string
- *                 format: binary
- *     responses:
- *       201:
- *         description: Created
- *       400:
- *         description: Missing name
- */
-app.post('/register', upload.single('photo'), (req, res) => {
-  if (!req.body.inventory_name) return res.status(400).send("Name required");
+app.post("/register", upload.single("photo"), async (req, res) => {
+  try {
+    if (!req.body.inventory_name)
+      return res.status(400).send("Name required");
 
-  const item = {
-    id: nextId++,
-    name: req.body.inventory_name,
-    description: req.body.description || "",
-    photo: req.file ? req.file.filename : null
-  };
+    const result = await pool.query(
+      `INSERT INTO inventory(name, description, photo)
+       VALUES($1,$2,$3)
+       RETURNING *`,
+      [
+        req.body.inventory_name,
+        req.body.description || "",
+        req.file ? req.file.filename : null
+      ]
+    );
 
-  inventory.push(item);
-
-  res.status(201).json(item);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send("Server error");
+  }
 });
 
 /* =======================
    GET ALL
 ======================= */
-/**
- * @openapi
- * /inventory:
- *   get:
- *     summary: Get all items
- *     responses:
- *       200:
- *         description: OK
- */
-app.get('/inventory', (req, res) => {
-  res.json(inventory);
+app.get("/inventory", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM inventory ORDER BY id"
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).send("Server error");
+  }
 });
 
 /* =======================
    GET ONE
 ======================= */
-/**
- * @openapi
- * /inventory/{id}:
- *   get:
- *     summary: Get item by id
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: integer
- *     responses:
- *       200:
- *         description: OK
- *       404:
- *         description: Not found
- */
-app.get('/inventory/:id', (req, res) => {
-  const id = Number(req.params.id);
+app.get("/inventory/:id", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM inventory WHERE id=$1",
+      [req.params.id]
+    );
 
-  const item = inventory.find(x => x.id === id);
+    if (result.rows.length === 0)
+      return res.sendStatus(404);
 
-  if (!item) return res.sendStatus(404);
-
-  res.json(item);
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send("Server error");
+  }
 });
 
 /* =======================
    UPDATE
 ======================= */
-app.put('/inventory/:id', (req, res) => {
-  const id = Number(req.params.id);
+app.put("/inventory/:id", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE inventory
+       SET name = COALESCE($1,name),
+           description = COALESCE($2,description)
+       WHERE id=$3
+       RETURNING *`,
+      [
+        req.body.name || null,
+        req.body.description || null,
+        req.params.id
+      ]
+    );
 
-  const item = inventory.find(x => x.id === id);
+    if (result.rows.length === 0)
+      return res.sendStatus(404);
 
-  if (!item) return res.sendStatus(404);
-
-  if (req.body.name) item.name = req.body.name;
-  if (req.body.description) item.description = req.body.description;
-
-  res.json(item);
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send("Server error");
+  }
 });
 
 /* =======================
-   DELETE (FIXED)
+   DELETE
 ======================= */
-/**
- * @openapi
- * /inventory/{id}:
- *   delete:
- *     summary: Delete item
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: integer
- *     responses:
- *       200:
- *         description: Deleted
- *       404:
- *         description: Not found
- */
-app.delete('/inventory/:id', (req, res) => {
-  const id = Number(req.params.id);
+app.delete("/inventory/:id", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "DELETE FROM inventory WHERE id=$1 RETURNING *",
+      [req.params.id]
+    );
 
-  const index = inventory.findIndex(x => x.id === id);
+    if (result.rows.length === 0)
+      return res.sendStatus(404);
 
-  if (index === -1) return res.sendStatus(404);
-
-  inventory.splice(index, 1);
-
-  res.sendStatus(200);
+    res.sendStatus(200);
+  } catch (error) {
+    res.status(500).send("Server error");
+  }
 });
 
 /* =======================
    GET PHOTO
 ======================= */
-/**
- * @openapi
- * /inventory/{id}/photo:
- *   get:
- *     summary: Get photo
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: integer
- *     responses:
- *       200:
- *         description: Image
- *       404:
- *         description: Not found
- */
-app.get('/inventory/:id/photo', (req, res) => {
-  const id = Number(req.params.id);
+app.get("/inventory/:id/photo", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM inventory WHERE id=$1",
+      [req.params.id]
+    );
 
-  const item = inventory.find(x => x.id === id);
+    if (
+      result.rows.length === 0 ||
+      !result.rows[0].photo
+    ) {
+      return res.sendStatus(404);
+    }
 
-  if (!item || !item.photo) return res.sendStatus(404);
-
-  res.sendFile(path.join(__dirname, 'photos', item.photo));
+    res.sendFile(
+      path.join(__dirname, "photos", result.rows[0].photo)
+    );
+  } catch (error) {
+    res.status(500).send("Server error");
+  }
 });
 
 /* =======================
    UPDATE PHOTO
 ======================= */
-app.put('/inventory/:id/photo', upload.single('photo'), (req, res) => {
-  const id = Number(req.params.id);
+app.put(
+  "/inventory/:id/photo",
+  upload.single("photo"),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `UPDATE inventory
+         SET photo=$1
+         WHERE id=$2
+         RETURNING *`,
+        [req.file.filename, req.params.id]
+      );
 
-  const item = inventory.find(x => x.id === id);
+      if (result.rows.length === 0)
+        return res.sendStatus(404);
 
-  if (!item) return res.sendStatus(404);
-
-  item.photo = req.file.filename;
-
-  res.sendStatus(200);
-});
+      res.sendStatus(200);
+    } catch (error) {
+      res.status(500).send("Server error");
+    }
+  }
+);
 
 /* =======================
    SEARCH
 ======================= */
-/**
- * @openapi
- * /search:
- *   post:
- *     summary: Search item
- *     requestBody:
- *       required: true
- *       content:
- *         application/x-www-form-urlencoded:
- *           schema:
- *             type: object
- *             properties:
- *               id:
- *                 type: integer
- *               has_photo:
- *                 type: boolean
- *     responses:
- *       200:
- *         description: Found
- *       404:
- *         description: Not found
- */
-app.post('/search', (req, res) => {
-  const id = Number(req.body.id);
+app.post("/search", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM inventory WHERE id=$1",
+      [req.body.id]
+    );
 
-  const item = inventory.find(x => x.id === id);
+    if (result.rows.length === 0)
+      return res.sendStatus(404);
 
-  if (!item) return res.sendStatus(404);
+    let item = result.rows[0];
 
-  let result = { ...item };
+    if (req.body.has_photo) {
+      item.photoLink = `/inventory/${item.id}/photo`;
+    }
 
-  if (req.body.has_photo) {
-    result.photoLink = `/inventory/${item.id}/photo`;
+    res.json(item);
+  } catch (error) {
+    res.status(500).send("Server error");
   }
-
-  res.json(result);
 });
 
 /* =======================
@@ -306,6 +261,11 @@ app.use((req, res) => {
    START
 ======================= */
 app.listen(options.port, options.host, () => {
-  console.log(`Server: http://${options.host}:${options.port}`);
-  console.log(`Swagger: http://${options.host}:${options.port}/api-docs`);
+  console.log(
+    `Server: http://${options.host}:${options.port}`
+  );
+
+  console.log(
+    `Swagger: http://${options.host}:${options.port}/api-docs`
+  );
 });
